@@ -11,3 +11,6 @@ managed_components/
 /.agents/skills/passport-build
 /.agents/skills/passport-device-test
 /.agents/skills/passport-debug
+
+# Stall badge: personal shop content and payment payloads stay local.
+/main/badge_content_local.c
