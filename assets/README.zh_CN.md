@@ -10,6 +10,10 @@
 
 可复用的字库文件与生成的字库源码放在 `fonts/`。
 
+| 文件 | 字符与格式 | 用途与来源 |
+| --- | --- | --- |
+| `fonts/mirror_font_16.c`、`fonts/mirror_font_24.c` | 约 5600 字：ASCII、Latin-1、GB2312 一级汉字、JIS X 0208 第一水准汉字、假名、中日文标点、全角字符、箭头，以及固件中的全部字符串（额外字符见 [`fonts/mirror_glyphs_extra.txt`](fonts/mirror_glyphs_extra.txt)）。LVGL C 字库，未压缩；16 px 常规体 4 bpp，24 px 粗体 2 bpp。 | [通知镜像](../docs/notification-mirror.zh_CN.md)中的动态通知文字。由 `tools/gen_mirror_fonts.py` 调用 `lv_font_conv` 1.5.3 从思源黑体（Noto Sans SC，SIL Open Font License 1.1）生成；字体从脚本中记录的 `notofonts/noto-cjk` 固定提交下载，并校验 SHA-256。 |
+
 - 命名要能反映字族、字重、字级与格式。
 - 记录来源、许可、字符范围、转换命令与目标放置路径。
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
@@ -24,6 +28,7 @@
 | [`images/home.jpg`](images/home.jpg) | 3840 × 2160，JPEG | 嵌入中英文项目 README 的产品主图，突出 AI Passport 产品形象与开放、人人可创作的理念。 |
 | [`images/readme-hardware-specs.png`](images/readme-hardware-specs.png) | 2172 × 724，PNG RGBA | 保留为可选技术参考图，不再用于首页主视觉。于 2026-09-17 使用内置图像生成工具为本仓库生成；已根据文档中的硬件能力契约核对图中的六项标签与参数。 |
 | [`images/logo-wordmark.png`](images/logo-wordmark.png) | 1648 × 336，PNG RGBA | 从仓库原始 `images/logo.png` 中精确裁切并去除背景的黑色字标；用于中英文项目 README 的浅色主题。 |
+| [`images/notification-mirror-preview.png`](images/notification-mirror-preview.png) | 1296 × 352，PNG RGB | 由 `tools/mirror_preview.py` 用虚构通知在电脑上渲染的五个通知镜像画面，已套用设备的圆角遮罩。嵌入[通知镜像说明](../docs/notification-mirror.zh_CN.md)。 |
 | [`images/logo-wordmark-dark.png`](images/logo-wordmark-dark.png) | 1648 × 336，PNG RGBA | 提取字标的白色版本；README 使用 `<picture>` 在 GitHub 深色主题下显示。 |
 
 - 使用描述性命名，并记录尺寸、像素格式、转换步骤与目标路径。

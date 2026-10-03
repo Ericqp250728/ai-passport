@@ -54,6 +54,16 @@ run_static_checks() {
         tests/test_bsp_audio_recovery.c components/bsp/src/bsp_es8311_sleep_check.c \
         -o "${test_dir}/test_bsp_audio_recovery"
     "${test_dir}/test_bsp_audio_recovery"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ancs_proto.c main/ancs_proto.c -o "${test_dir}/test_ancs_proto"
+    "${test_dir}/test_ancs_proto"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_notif_model.c main/notif_model.c main/ancs_proto.c \
+        -o "${test_dir}/test_notif_model"
+    "${test_dir}/test_notif_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_mirror_nav.c main/mirror_nav.c -o "${test_dir}/test_mirror_nav"
+    "${test_dir}/test_mirror_nav"
     for demo in audio low_power ble wifi; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
             -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
@@ -66,6 +76,7 @@ run_static_checks() {
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_archive_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_install_passport_skills.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_mirror_fonts.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }
