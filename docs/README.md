@@ -51,6 +51,10 @@ it anything—from a pocket companion to something no one has imagined yet.
 | Prepare my environment and build firmware | [Environment setup](development/engineering/environment-setup.md) · [Build and test](development/engineering/build-and-test.md) |
 | Explore the board or contribute | [Hardware guide](hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md) · [Contributing](../.github/CONTRIBUTING.md) |
 
+> [!TIP]
+> This branch ships **[Notification Mirror](notification-mirror.md)**: iPhone
+> notifications and maps turn prompts on AI Passport over Bluetooth.
+
 > [!IMPORTANT]
 > `main` is a minimal, runnable **hardware-test baseline**, not a finished application.
 > Derivative applications must design their own UI; the current demo test menu and
