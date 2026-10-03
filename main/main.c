@@ -1,242 +1,258 @@
-// main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
+// main/main.c —— 摊主胸牌:挂在胸前的招牌、收款码和本场记账本。
 //
-// 按键语义(全局统一):
-//   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
-//   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
-#include "bsp_i2c.h"
-#include "bsp_display.h"
-#include "bsp_button.h"
+// 线程模型:
+//   按键回调(esp_timer 任务) ──入队──▶ badge_app 任务(本文件)──持锁──▶ LVGL
+//                                          │
+//                                          ├─ NVS 保存账本(阻塞数毫秒,不在回调/LVGL 锁里做)
+//                                          ├─ 每 30 秒读一次电量(I2C)
+//                                          └─ 提示音入队 ──▶ badge_sfx 任务 ──▶ I2S
+// 按键与页面的对应关系见 badge_nav.h。
+#include "badge_content.h"
+#include "badge_fmt.h"
+#include "badge_ledger.h"
+#include "badge_nav.h"
+#include "badge_sfx.h"
+#include "badge_store.h"
+#include "badge_ui.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
-#include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
-#include "demo.h"
-#include "demo_navigation.h"
-#include "ui_pixel.h"
-#include "lvgl.h"
+#include "bsp_button.h"
+#include "bsp_display.h"
+#include "bsp_i2c.h"
+#include "bsp_pins.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include <stdio.h>
 
-static const char *TAG = "main";
+static const char *TAG = "badge";
 
-static const demo_entry_t DEMOS[] = {
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
-      .key = demo_display_key },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
-      .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
-      .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
-      .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
-      .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
-      .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
-      .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
-};
-#define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
-#define INPUT_QUEUE_DEPTH 8
+#define INPUT_QUEUE_DEPTH   8
+#define TICK_MS             500
+#define BATTERY_PERIOD_MS   30000u
 
 typedef struct {
     bsp_btn_t btn;
     bsp_btn_ev_t event;
 } input_event_t;
 
-// 各外设初始化结果:失败的项在菜单里标 [FAIL] 且不允许进入。
-static bool s_ok[DEMO_COUNT];
-
-static lv_obj_t *s_menu_scr;
-static lv_obj_t *s_cards[DEMO_COUNT];
-static lv_obj_t *s_rows[DEMO_COUNT];
-static lv_obj_t *s_mascot;
-static demo_navigation_t s_navigation;
 static QueueHandle_t s_input_queue;
-static TaskHandle_t s_input_task;
-static volatile bool s_input_ready;
+static badge_nav_t s_nav;
+static badge_ledger_t s_ledger;
+static bool s_battery_ok;
+static uint32_t s_last_battery_ms;
 
-static void menu_refresh(void) {
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        lv_label_set_text_fmt(s_rows[i], "%s%s",
-                              DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
-        ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
-        lv_obj_set_style_text_color(s_rows[i],
-            s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
-    }
+static uint32_t now_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
-
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
-        s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(s_rows[i]);
-    }
-
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 101, 242);
-
-    menu_refresh();
-    lv_screen_load(s_menu_scr);
+static void apply_backlight(void) {
+    bsp_display_backlight(badge_nav_backlight(&s_nav));
 }
 
-static void enter_menu(void) {
-    menu_build();
-}
-
-static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
-    if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
-    if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
-    if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
-    if (btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_CLICK;
-    return DEMO_NAV_INPUT_OTHER;
-}
-
-static void process_input(const input_event_t *input) {
-    demo_nav_input_t nav_input = navigation_input(input->btn, input->event);
-
-    if (s_navigation.active >= 0) {
-        demo_nav_result_t result = demo_navigation_handle(&s_navigation, nav_input, true);
-        const demo_entry_t *demo = &DEMOS[result.index];
-        if (result.action == DEMO_NAV_ACTION_EXIT) {
-            esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
-            if (e != ESP_OK) {
-                ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-                return;
-            }
-            if (!bsp_lvgl_lock(500)) return;
-            demo->exit();
-            demo_navigation_complete_exit(&s_navigation);
-            enter_menu();
-            bsp_lvgl_unlock();
-        } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
-            demo->key(input->btn, input->event);
-        }
-        return;
-    }
-
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
+static void toast(const char *text, bool error) {
     if (!bsp_lvgl_lock(500)) return;
-    demo_nav_result_t result = demo_navigation_handle(
-        &s_navigation, nav_input, s_ok[s_navigation.selected]);
-    if (result.action == DEMO_NAV_ACTION_REFRESH) {
-        menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (result.action == DEMO_NAV_ACTION_ENTER) {
-        const demo_entry_t *demo = &DEMOS[result.index];
-        ui_pixel_mascot_jump(s_mascot);
-        lv_obj_delete(s_menu_scr);
-        s_menu_scr = NULL;
-        s_mascot = NULL;
-        demo->enter();
-        bsp_lvgl_unlock();
-
-        esp_err_t e = demo->start ? demo->start() : ESP_OK;
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "%s 页面启动失败: %s", demo->name, esp_err_to_name(e));
-        }
-        return;
-    }
+    badge_ui_toast(text, error);
+    badge_ui_refresh(&s_nav, &s_ledger);
     bsp_lvgl_unlock();
 }
 
-static void input_task(void *arg) {
+static bool save_ledger(void) {
+    esp_err_t e = badge_store_save_ledger(&s_ledger);
+    if (e != ESP_OK) ESP_LOGE(TAG, "账本保存失败: %s", esp_err_to_name(e));
+    return e == ESP_OK;
+}
+
+static void do_record(void) {
+    size_t item = s_nav.sell_index;
+    const badge_item_t *it = &BADGE_CONTENT.items[item];
+    if (!badge_ledger_record(&s_ledger, item, it->price_cents)) {
+        badge_sfx_play(BADGE_SFX_ERROR);
+        toast(it->price_cents == 0 ? "这件商品还没设价格" : "记不下了,先清零账本", true);
+        return;
+    }
+    bool saved = save_ledger();
+    badge_sfx_play(BADGE_SFX_RECORD);
+    char price[24], msg[64];
+    badge_fmt_cents(it->price_cents, true, price, sizeof(price));
+    if (saved) {
+        snprintf(msg, sizeof(msg), "+%s  %s", price, it->name);
+    } else {
+        snprintf(msg, sizeof(msg), "+%s 已记(未存盘)", price);
+    }
+    toast(msg, !saved);
+}
+
+static void do_undo(void) {
+    size_t item;
+    uint32_t cents;
+    if (!badge_ledger_undo(&s_ledger, &item, &cents)) {
+        badge_sfx_play(BADGE_SFX_ERROR);
+        toast("没有可撤销的记录", true);
+        return;
+    }
+    bool saved = save_ledger();
+    badge_sfx_play(BADGE_SFX_UNDO);
+    char price[24], msg[64];
+    badge_fmt_cents(cents, true, price, sizeof(price));
+    snprintf(msg, sizeof(msg), "已撤销 %s -%s", BADGE_CONTENT.items[item].name, price);
+    toast(msg, !saved);
+}
+
+static void do_clear(void) {
+    badge_ledger_reset(&s_ledger);
+    bool saved = save_ledger();
+    badge_sfx_play(BADGE_SFX_CLEAR);
+    toast(saved ? "本场账本已清零" : "已清零(未存盘)", !saved);
+}
+
+static void handle(badge_action_t action, bool from_user) {
+    switch (action) {
+    case BADGE_ACTION_NONE:
+        return;
+    case BADGE_ACTION_PAGE:
+        if (bsp_lvgl_lock(500)) {
+            badge_ui_show_page(&s_nav, &s_ledger);
+            bsp_lvgl_unlock();
+        }
+        break;
+    case BADGE_ACTION_SELECT:
+    case BADGE_ACTION_CLEAR_ARM:
+    case BADGE_ACTION_CLEAR_DISARM:
+        if (bsp_lvgl_lock(500)) {
+            badge_ui_refresh(&s_nav, &s_ledger);
+            bsp_lvgl_unlock();
+        }
+        break;
+    case BADGE_ACTION_BRIGHTNESS:
+        // 只有用户主动调节才存盘;闲置调暗是临时状态
+        if (from_user) (void)badge_store_save_brightness(s_nav.brightness);
+        break;
+    case BADGE_ACTION_WAKE:
+        break;
+    case BADGE_ACTION_RECORD:
+        do_record();
+        break;
+    case BADGE_ACTION_UNDO:
+        do_undo();
+        break;
+    case BADGE_ACTION_CLEAR:
+        do_clear();
+        break;
+    }
+    apply_backlight();
+}
+
+static void on_input(const input_event_t *input) {
+    badge_key_t key = input->btn == BSP_BTN_UP ? BADGE_KEY_UP
+                    : input->btn == BSP_BTN_DOWN ? BADGE_KEY_DOWN : BADGE_KEY_OK;
+    switch (input->event) {
+    case BSP_BTN_CLICK:
+        handle(badge_nav_input(&s_nav, key, BADGE_PRESS_CLICK, now_ms()), true);
+        break;
+    case BSP_BTN_DOUBLE:
+        // 快速连按两下时 button 组件只报 DOUBLE,不报两次 CLICK;按两次单击处理,
+        // 否则在价目表里快速下移会"丢一格"。
+        handle(badge_nav_input(&s_nav, key, BADGE_PRESS_CLICK, now_ms()), true);
+        handle(badge_nav_input(&s_nav, key, BADGE_PRESS_CLICK, now_ms()), true);
+        break;
+    case BSP_BTN_LONG:
+        handle(badge_nav_input(&s_nav, key, BADGE_PRESS_LONG, now_ms()), true);
+        break;
+    default:
+        break;   // PRESS(按下瞬间)不用:本应用都是"松手/长按"语义
+    }
+}
+
+static void refresh_battery(void) {
+    if (!s_battery_ok) return;
+    int soc = bsp_battery_soc();   // I2C 读,放在锁外
+    if (bsp_lvgl_lock(500)) {
+        badge_ui_set_battery(soc);
+        bsp_lvgl_unlock();
+    }
+}
+
+static void app_task(void *arg) {
     (void)arg;
     input_event_t input;
     for (;;) {
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
-            process_input(&input);
+        if (xQueueReceive(s_input_queue, &input, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
+            on_input(&input);
+        }
+        uint32_t now = now_ms();
+        handle(badge_nav_tick(&s_nav, now), false);
+        if ((uint32_t)(now - s_last_battery_ms) >= BATTERY_PERIOD_MS) {
+            s_last_battery_ms = now;
+            refresh_battery();
         }
     }
 }
 
-static esp_err_t input_dispatch_init(void) {
-    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
-    if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "demo_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static void input_dispatch_deinit(void) {
-    s_input_ready = false;
-    if (s_input_task) {
-        vTaskDelete(s_input_task);
-        s_input_task = NULL;
-    }
-    if (s_input_queue) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-    }
-}
-
-// button callbacks run on the shared esp_timer task; enqueue only and return immediately.
+// 按键回调运行在共享的 esp_timer 任务里:只入队,立即返回。
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
-    if (!s_input_ready || !s_input_queue) return;
+    if (!s_input_queue) return;
     const input_event_t input = { .btn = btn, .event = ev };
     (void)xQueueSend(s_input_queue, &input, 0);
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
-    }
+    ESP_LOGI(TAG, "摊主胸牌启动");
 
     bsp_i2c_init();
-    bsp_i2c_scan();
 
-    // 屏幕是本 demo 的 UI 载体,失败就没有菜单可言 —— 打清楚日志后退出,
-    // 不做"串口菜单"降级(那会让本文件复杂一倍,违背参考示例的初衷)。
+    // 屏幕是胸牌的全部意义:失败就打清楚日志后退出。
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "显示/LVGL 初始化失败,demo 无法继续。"
-                      "检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
+        ESP_LOGE(TAG, "显示/LVGL 初始化失败,检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
                  BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
         return;
     }
-    bsp_display_backlight(100);
 
-    demo_navigation_init(&s_navigation, DEMO_COUNT);
-
-    // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
-    esp_err_t input_err = input_dispatch_init();
-    esp_err_t button_err = input_err == ESP_OK
-                         ? bsp_button_init(on_key, NULL)
-                         : ESP_ERR_INVALID_STATE;
-    s_ok[1] = input_err == ESP_OK && button_err == ESP_OK;
-    if (input_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
-    } else if (button_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
-        input_dispatch_deinit();
+    if (badge_store_init() == ESP_OK) {
+        esp_err_t e = badge_store_load_ledger(&s_ledger);
+        if (e != ESP_OK) ESP_LOGW(TAG, "账本读取: %s", esp_err_to_name(e));
+    } else {
+        badge_ledger_reset(&s_ledger);
     }
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
+
+    size_t item_count = BADGE_CONTENT.item_count;
+    if (item_count > BADGE_MAX_ITEMS) item_count = BADGE_MAX_ITEMS;
+    size_t pay_count = BADGE_CONTENT.pay_count;
+    if (pay_count > BADGE_MAX_PAY) pay_count = BADGE_MAX_PAY;
+    badge_nav_init(&s_nav, pay_count, item_count, now_ms());
+    uint8_t level = badge_store_load_brightness(s_nav.brightness);
+    if (level < BADGE_BRIGHTNESS_LEVELS) s_nav.brightness = level;
+
+    // 声音和电量是锦上添花:失败只记日志,胸牌照常工作。
+    if (bsp_audio_init() == ESP_OK) {
+        if (badge_sfx_init() != ESP_OK) ESP_LOGW(TAG, "提示音任务创建失败,将静音运行");
+    } else {
+        ESP_LOGW(TAG, "音频初始化失败,将静音运行");
+    }
+    s_battery_ok = bsp_battery_init() == ESP_OK;
+    int soc = s_battery_ok ? bsp_battery_soc() : -1;
+    s_last_battery_ms = now_ms();
 
     if (bsp_lvgl_lock(1000)) {
-        enter_menu();
+        badge_ui_init(&BADGE_CONTENT);
+        badge_ui_set_battery(soc);
+        badge_ui_show_page(&s_nav, &s_ledger);
         bsp_lvgl_unlock();
-        s_input_ready = true;
     }
+    apply_backlight();
 
-    ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
+    if (!s_input_queue || xTaskCreate(app_task, "badge_app", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "应用任务创建失败,胸牌只能显示招牌");
+        return;
+    }
+    esp_err_t e = bsp_button_init(on_key, NULL);
+    if (e != ESP_OK) ESP_LOGE(TAG, "按键初始化失败: %s,胸牌只能显示招牌", esp_err_to_name(e));
+
+    ESP_LOGI(TAG, "就绪:本场 %u 笔,%lu 分;商品 %u 种,收款码 %u 个",
+             (unsigned)s_ledger.sales, (unsigned long)s_ledger.total_cents,
+             (unsigned)item_count, (unsigned)pay_count);
 }

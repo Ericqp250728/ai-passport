@@ -50,6 +50,10 @@
 | 准备环境、编译固件 | [环境准备](development/engineering/environment-setup.zh_CN.md) · [构建与测试](development/engineering/build-and-test.zh_CN.md) |
 | 了解硬件、参与贡献 | [硬件指南](hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.zh_CN.md) · [贡献指南](../.github/CONTRIBUTING.zh_CN.md) |
 
+> [!TIP]
+> 本分支带有 **[摊主胸牌](stall-badge.zh_CN.md)**：可穿戴的招牌、收款码和本场账本，
+> 适合市集摆摊与接单服务。
+
 > [!IMPORTANT]
 > `main` 是最小可运行的**硬件测试基线**，不是成品应用。
 > 二次开发必须重新设计 UI，禁止沿用当前 demo 测试菜单和页面；

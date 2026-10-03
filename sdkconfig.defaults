@@ -25,8 +25,11 @@ CONFIG_LV_DEF_REFR_PERIOD=20
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 # LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 本 demo UI 简单,24KB 足够;若自建复杂界面出现绘制卡死/看门狗,调大此值。
-CONFIG_LV_MEM_SIZE_KILOBYTES=24
+# 若自建复杂界面出现绘制卡死/看门狗,调大此值。
+CONFIG_LV_MEM_SIZE_KILOBYTES=32
+# 摊主胸牌:收款页在设备上实时生成二维码(196px 的 1bpp 画布约 5KB,来自上面的 LVGL 池)。
+# 池从 24KB 调到 32KB,给二维码画布和记账页的行对象留余量。
+CONFIG_LV_USE_QRCODE=y
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
